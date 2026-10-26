@@ -1,7 +1,7 @@
 Option Explicit
 
 '============================================================
-' 18桁番号の目くらまし / Windows版Excel VBA7専用（32/64bit）
+' 18桁番号の目くらまし / MSForms参照設定不要版・Windows版Excel（32/64bit）
 ' 元コード互換：左から1 / 2222 / 3333 / 4444 / 55555を加算。
 ' 各桁は10で循環。復元は減算。暗号化を目的としない。
 '
@@ -17,29 +17,25 @@ Option Explicit
 ' Excelセルも文字列で保存する。数値で丸めた18桁は復元不可。
 '
 ' Text版は18桁String、旧名の関数は従来どおりDecimalを返す。
-' この.basをVBEでインポートし、旧モジュールと置き換える。
+' このファイル全文を標準モジュールへ貼り付け、旧コードを置き換える。
+' API宣言は使用しない。会社環境での保存・コピー動作は要確認。
+' Alt+F8：番号を変換する / 番号を復元してコピーする を実行する。
 '============================================================
 
-Private Declare PtrSafe Function OpenClipboard Lib "user32" (ByVal hWnd As LongPtr) As Long
-Private Declare PtrSafe Function CloseClipboard Lib "user32" () As Long
-Private Declare PtrSafe Function EmptyClipboard Lib "user32" () As Long
-Private Declare PtrSafe Function SetClipboardData Lib "user32" (ByVal fmt As Long, ByVal hMem As LongPtr) As LongPtr
-Private Declare PtrSafe Function GlobalAlloc Lib "kernel32" (ByVal flags As Long, ByVal size As LongPtr) As LongPtr
-Private Declare PtrSafe Function GlobalLock Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
-Private Declare PtrSafe Function GlobalUnlock Lib "kernel32" (ByVal hMem As LongPtr) As Long
-Private Declare PtrSafe Function GlobalFree Lib "kernel32" (ByVal hMem As LongPtr) As LongPtr
-Private Declare PtrSafe Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" ( _
-    ByVal destination As LongPtr, ByVal source As LongPtr, ByVal size As LongPtr)
-Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal milliseconds As Long)
-Private Declare PtrSafe Sub SetLastError Lib "kernel32" (ByVal errorCode As Long)
+
+
+'参照設定・ユーザーフォームの追加は不要。
+'MSFormsのDataObjectを実行時に生成する（遅延バインディング）。
+'MSForms自体が未導入・登録不良・会社の制限で使えない場合は、
+'生成時にエラーを通知する。参照設定不要でも部品への依存は残る。
+'クラスIDはMSForms.DataObjectを識別する公開のIDであり、
+'セキュリティ設定の変更やDLLの登録処理は行わない。
+'コピーを設定したDataObjectをモジュール変数で保持する。
+'次のコピー成功時に置き換える。Excel終了時に解放される。
+Private mClipboard As Object
 
 Private Const NUMBER_LENGTH As Long = 18
 Private Const OFFSETS As String = "122223333444455555"
-Private Const CF_UNICODETEXT As Long = 13
-Private Const GMEM_MOVEABLE As Long = &H2
-Private Const GMEM_ZEROINIT As Long = &H40
-Private Const CLIPBOARD_RETRIES As Long = 10
-Private Const RETRY_DELAY_MS As Long = 25
 Private Const ERR_INPUT As Long = vbObjectError + 1010
 Private Const ERR_CLIPBOARD As Long = vbObjectError + 1100
 Private Const ERR_TEST As Long = vbObjectError + 1200
@@ -121,100 +117,105 @@ Public Sub CopyDecodedNumber(ByVal encodedNumber As Variant)
     CopyTextToClipboard DecodeNumberText(encodedNumber)
 End Sub
 
-'汎用Unicodeコピー。空文字は許可。途中NULは切り捨て防止で拒否。
+
+'汎用テキストコピー。数字18桁の経路はCopyDecodedNumberから呼ぶ。
+'セルのCopyを使わないので、セル由来の区切りや改行を追加しない。
+'失敗時は成功メッセージを出さず、元のエラー番号と説明を通知する。
 Public Sub CopyTextToClipboard(ByVal textValue As String)
-    Dim hMem As LongPtr
-    Dim pMem As LongPtr
-    Dim ownerWindow As LongPtr
-    Dim byteCount As LongPtr
-    Dim clipboardOpen As Boolean
-    Dim memoryLocked As Boolean
-    Dim attempt As Long
-    Dim apiResult As Long
-    Dim apiError As Long
+    Dim nextClipboard As Object
     Dim savedNumber As Long
     Dim savedDescription As String
-    Dim savedSource As String
-    On Error GoTo Failed
+
+    'NULを含む文字列は途中で切れる恐れがあるためコピー前に拒否。
     If InStr(1, textValue, vbNullChar, vbBinaryCompare) > 0 Then
-        Err.Raise ERR_INPUT, "CopyTextToClipboard", "途中にNUL文字を含む文字列はコピーできません。"
+        Err.Raise ERR_INPUT, "CopyTextToClipboard", _
+            "途中にNUL文字を含む文字列はコピーできません。"
     End If
-    ownerWindow = Application.hWnd
-    If ownerWindow = 0 Then
-        Err.Raise ERR_CLIPBOARD, "CopyTextToClipboard", "Excelのウィンドウを取得できません。"
-    End If
-    '先にメモリを準備し、クリップボードの占有時間を短くする。
-    'LongPtrに代入した後で終端2バイトを足す。
-    byteCount = LenB(textValue)
-    byteCount = byteCount + 2
-    hMem = GlobalAlloc(GMEM_MOVEABLE Or GMEM_ZEROINIT, byteCount)
-    If hMem = 0 Then
-        apiError = Err.LastDllError
-        RaiseApiError "GlobalAlloc", apiError
-    End If
-    pMem = GlobalLock(hMem)
-    If pMem = 0 Then
-        apiError = Err.LastDllError
-        RaiseApiError "GlobalLock", apiError
-    End If
-    memoryLocked = True
-    If LenB(textValue) > 0 Then CopyMemory pMem, StrPtr(textValue), LenB(textValue)
-    '終端2バイトはGlobalAllocでゼロ初期化済み。
 
-    'GlobalUnlockは最終ロック解除の成功時にも0を返す。
-    'LastErrorを先に0にし、戻り値0かつエラー非0だけを失敗扱い。
-    SetLastError 0
-    apiResult = GlobalUnlock(hMem)
-    apiError = Err.LastDllError
-    If apiResult = 0 And apiError <> 0 Then RaiseApiError "GlobalUnlock", apiError
-    memoryLocked = False
-    pMem = 0
-    For attempt = 1 To CLIPBOARD_RETRIES
-        apiResult = OpenClipboard(ownerWindow)
-        If apiResult <> 0 Then
-            clipboardOpen = True
-            Exit For
-        End If
-        apiError = Err.LastDllError
-        If attempt < CLIPBOARD_RETRIES Then Sleep RETRY_DELAY_MS
-    Next attempt
-    If Not clipboardOpen Then RaiseApiError "OpenClipboard", apiError
+    On Error GoTo Failed
+    Set nextClipboard = CreateClipboardObject()
+    nextClipboard.SetText textValue, 1
+    nextClipboard.PutInClipboard
 
-    'ここから既存内容を置き換える。EmptyClipboard成功後に
-    'SetClipboardDataが失敗すると元内容は戻らない。エラーで通知する。
-    If EmptyClipboard() = 0 Then
-        apiError = Err.LastDllError
-        RaiseApiError "EmptyClipboard", apiError
-    End If
-    If SetClipboardData(CF_UNICODETEXT, hMem) = 0 Then
-        apiError = Err.LastDllError
-        RaiseApiError "SetClipboardData", apiError
-    End If
-    '成功後はWindowsの所有物になる。以後GlobalFreeは禁止。
-    hMem = 0
-    If CloseClipboard() = 0 Then
-        apiError = Err.LastDllError
-        '開いた状態を維持し、Failedで閉じ直す。
-        RaiseApiError "CloseClipboard（データ設定後）", apiError
-    End If
-    clipboardOpen = False
+    'PutInClipboardが成功してから保持先を置き換える。
+    Set mClipboard = nextClipboard
     Exit Sub
+
 Failed:
-    '後始末で元のエラーが消えないよう退避し、最後に再通知する。
     savedNumber = Err.Number
     savedDescription = Err.Description
-    savedSource = Err.Source
-    On Error Resume Next
-    If memoryLocked Then apiResult = GlobalUnlock(hMem)
-    If hMem <> 0 Then pMem = GlobalFree(hMem)
-    If clipboardOpen Then apiResult = CloseClipboard()
-    On Error GoTo 0
-    Err.Raise savedNumber, savedSource, savedDescription
+    Err.Raise ERR_CLIPBOARD, "CopyTextToClipboard", _
+        "MSFormsでのコピーに失敗しました。" & vbCrLf & _
+        "元のエラー番号：" & CStr(savedNumber) & vbCrLf & savedDescription
 End Sub
 
-Private Sub RaiseApiError(ByVal apiName As String, ByVal errorCode As Long)
-    Err.Raise ERR_CLIPBOARD, "CopyTextToClipboard", _
-        apiName & " に失敗しました。Win32エラー: " & CStr(errorCode)
+
+'生成方法を一か所に集約。型宣言にも参照ライブラリを使わない。
+Private Function CreateClipboardObject() As Object
+    Dim savedNumber As Long
+    Dim savedDescription As String
+    On Error GoTo Failed
+    Set CreateClipboardObject = CreateObject( _
+        "new:{1C3B4210-F441-11CE-B9EA-00AA006B1A69}")
+    Exit Function
+Failed:
+    savedNumber = Err.Number
+    savedDescription = Err.Description
+    Err.Raise ERR_CLIPBOARD, "CreateClipboardObject", _
+        "このPCでMSForms.DataObjectを生成できません。" & vbCrLf & _
+        "元のエラー番号：" & CStr(savedNumber) & vbCrLf & savedDescription
+End Function
+
+'Alt+F8から使う入口。入力は文字列で受け、数値への変換を避ける。
+Public Sub 番号を変換する()
+    RunNumberDialog True
+End Sub
+
+Public Sub 番号を復元してコピーする()
+    RunNumberDialog False
+End Sub
+
+Private Sub RunNumberDialog(ByVal isEncoding As Boolean)
+    Dim inputText As String
+    Dim outputText As String
+    Dim promptText As String
+    Dim titleText As String
+    On Error GoTo Failed
+
+    If isEncoding Then
+        promptText = "元の番号を半角数字18桁・ハイフンなしで入力してください。"
+        titleText = "番号の変換"
+    Else
+        promptText = "変換済みの番号を半角数字18桁・ハイフンなしで入力してください。"
+        titleText = "番号の復元とコピー"
+    End If
+    inputText = InputBox(promptText, titleText)
+    '標準InputBoxはキャンセルも空文字になる。どちらも何も変更しない。
+    If Len(inputText) = 0 Then Exit Sub
+
+    '手入力では入力漏れ防止のため18桁ちょうどを要求する。
+    '既存APIの短い入力に対するゼロ埋め互換性はそのまま維持する。
+    If Len(inputText) <> NUMBER_LENGTH Then
+        Err.Raise ERR_INPUT, titleText, "半角数字18桁で入力してください。"
+    End If
+    If isEncoding Then
+        outputText = EncodeNumberText(inputText)
+    Else
+        outputText = DecodeNumberText(inputText)
+    End If
+    CopyTextToClipboard outputText
+
+    'コピー処理が正常終了した場合のみ成功を表示する。
+    If isEncoding Then
+        MsgBox "変換した18桁をコピーしました。" & vbCrLf & _
+            "文字列として保存してください。", vbInformation, titleText
+    Else
+        MsgBox "元の18桁をコピーしました。" & vbCrLf & _
+            "会社システムの入力欄に貼り付けてください。", vbInformation, titleText
+    End If
+    Exit Sub
+Failed:
+    MsgBox Err.Description, vbExclamation, "処理できませんでした"
 End Sub
 
 '自動テスト：クリップボードは変更しない。失敗はエラーで通知する。
@@ -299,12 +300,70 @@ Private Sub ExpectInvalid(ByVal value As Variant)
     End If
 End Sub
 
-'手動テスト：現在のクリップボードをテスト番号で置き換える。
-'メモ帳などに貼り付け、先頭0を含め18桁であることを確認する。
-'会社システム側の受入条件と自動ハイフン挿入も実際に確認する。
+
+'実機確認：クリップボードをテスト番号で上書きする。
+'MSFormsで読み戻して、先頭0・桁数・余分な改行がないことを確認。
+'この検査は会社システムの貼り付け受入までは保証しない。
+'実行後はメモ帳と会社システムの確認用入力欄でも確認する。
 Public Sub TestClipboardManually()
+    Dim readback As Object
+    Dim actual As String
+    On Error GoTo Failed
+
     CopyDecodedNumber "134568901345689012"
-    MsgBox "次の18桁をコピーしました。貼り付けて確認してください。" & vbCrLf & _
-        "012345678901234567" & vbCrLf & _
+    Set readback = CreateClipboardObject()
+    readback.GetFromClipboard
+    If Not readback.GetFormat(1) Then
+        Err.Raise ERR_TEST, "TestClipboardManually", "コピーしたテキストを取得できません。"
+    End If
+    actual = readback.GetText(1)
+    AssertText actual, "012345678901234567", "コピー内容の読み戻し"
+
+    MsgBox "PASS：コピー内容が18桁で一致しました。" & vbCrLf & _
+        "貼り付け確認用：012345678901234567" & vbCrLf & _
         "システムの想定表示：0-1234-5678-9012-34567", vbInformation
+    Exit Sub
+Failed:
+    MsgBox "FAIL：" & Err.Description, vbExclamation, "コピーの確認"
 End Sub
+Public Sub 組み込みテスト()
+'**********************************
+'Dim 元番号 As String
+'Dim 変換番号 As String
+'Dim 復元番号 As String
+'
+''好きな番号に変更して試せる
+'元番号 = "012345678901234567"
+'
+''元番号 → 目くらまし用番号
+'変換番号 = EncodeNumberText(元番号)
+'
+''目くらまし用番号 → 元番号
+'復元番号 = DecodeNumberText(変換番号)
+'
+''復元して会社システム用にコピー
+'CopyDecodedNumber 変換番号
+'**********************************
+    Dim originalText As String
+    Dim encodedText As String
+    Dim decodedText As String
+
+    'ここを好きな番号に変更する。必ず引用符で囲む。
+    originalText = "099998888777700001"
+
+    '変換結果を取得する
+    encodedText = EncodeNumberText(originalText)
+
+    '復元結果を取得する
+    decodedText = DecodeNumberText(encodedText)
+
+    'VBEでCtrl+Gを押すと、結果を確認できる
+    Debug.Print "元番号："; originalText
+    Debug.Print "変換後："; encodedText
+    Debug.Print "復元後："; decodedText
+
+    '復元した番号を会社システム用にコピーする
+    CopyDecodedNumber encodedText
+
+End Sub
+
